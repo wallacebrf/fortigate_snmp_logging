@@ -1,5 +1,5 @@
 #!/bin/bash
-#Version 12/02/2023
+#Version 12/16/2023
 #By Brian Wallace
 
 #This script pulls various information from a fortigate unit over SNMP
@@ -29,6 +29,13 @@
 # 12/02/2023
 	#modified the snmp_fail_fortAP_email function to change the email subject and to add the current time of the message inside the email body
 	#added fortiAP monitoring of the number of clients connected to the access point
+	
+# 12/16/2023
+	#corrected issue where fortiAP monitoring would only send notifications for one access point if multiple access points needed to send notifications
+	#corrected issue where fortiAP monitoring notifications would only indicate a access point status of "OTHER" regardless of the access point's real status
+	#added function to send email alerts if the sensors (if available) inside the fortigate are beyond the values configured in the web interface
+	#bug fix where if user variables for file/directory locations have spaces the script would fail
+	#simplified code by making one function to send all notification emails reducing code length by over 250 lines
 
 #############################################
 #VERIFICATIONS
@@ -36,24 +43,24 @@
 
 #*NOTICE! - I AM NOT USING IPSEC VPN SO I CANNOT VERIFY THE CODE WORKS PROPERLY FOR THAT SECTION
 
-#1.) data is collected into influx properly......................................................................... VERIFIED 8/27/2023*
+#1.) data is collected into influx properly......................................................................... VERIFIED 12/16/2023*
 	#NOTICE - I do not use IPSEC VPNs and so I cannot determine if the code section works. if you use this and IPSEC is not logging, please let me know.
 #2.) SNMP errors:
-	#a.) bad SNMP username causes script to shutdown with email..................................................... VERIFIED 8/27/2023
-	#b.) bad SNMP authpass causes script to shutdown with email..................................................... VERIFIED 8/27/2023
-	#c.) bad SNMP privacy pass causes script to shutdown with email................................................. VERIFIED 8/27/2023
-	#d.) bad SNMP ip address causes script to shutdown with email................................................... VERIFIED 8/27/2023
-	#e.) bad SNMP port causes script to shutdown with email......................................................... VERIFIED 8/27/2023
-	#f.) error emails a through e above only are sent within the allowed time interval.............................. VERIFIED 8/27/2023
-#3.) verify that when "sendmail" is unavailable, emails are not sent, and the appropriate warnings are displayed.... VERIFIED 8/27/2023
-#4.) verify script behavior when config file is unavailable......................................................... VERIFIED 8/27/2023
-#5.) verify script behavior when config file has wrong number of arguments.......................................... VERIFIED 8/27/2023
-#6.) verify script behavior when the target device is not available................................................. VERIFIED 8/27/2023
-#7.) verify email send when memory usage is over limit and only sends emails within allowed time interval........... VERIFIED 8/27/2023
-#8.) Verify fortiAP emails are sent if the AP is not "ONLINE"....................................................... VERIFIED 8/27/2023
-#9.) Verify disk space overages send email notification............................................................. VERIFIED 8/27/2023
-#10.) Verify USB device connections send email notification......................................................... VERIFIED 8/27/2023
-#11.) verify emails are sent when sensors are outside of configured parameters...................................... VERIFIED 8/27/2023
+	#a.) bad SNMP username causes script to shutdown with email..................................................... VERIFIED 12/16/2023
+	#b.) bad SNMP authpass causes script to shutdown with email..................................................... VERIFIED 12/16/2023
+	#c.) bad SNMP privacy pass causes script to shutdown with email................................................. VERIFIED 12/16/2023
+	#d.) bad SNMP ip address causes script to shutdown with email................................................... VERIFIED 12/16/2023
+	#e.) bad SNMP port causes script to shutdown with email......................................................... VERIFIED 12/16/2023
+	#f.) error emails a through e above only are sent within the allowed time interval.............................. VERIFIED 12/16/2023
+#3.) verify that when "sendmail" is unavailable, emails are not sent, and the appropriate warnings are displayed.... VERIFIED 12/16/2023
+#4.) verify script behavior when config file is unavailable......................................................... VERIFIED 12/16/2023
+#5.) verify script behavior when config file has wrong number of arguments.......................................... VERIFIED 12/16/2023
+#6.) verify script behavior when the target device is not available................................................. VERIFIED 12/16/2023
+#7.) verify email send when memory usage is over limit and only sends emails within allowed time interval........... VERIFIED 12/16/2023
+#8.) Verify fortiAP emails are sent if the AP is not "ONLINE"....................................................... VERIFIED 12/16/2023
+#9.) Verify disk space overages send email notification............................................................. VERIFIED 12/16/2023
+#10.) Verify USB device connections send email notification......................................................... VERIFIED 12/16/2023
+#11.) verify emails are sent when sensors are outside of configured parameters...................................... VERIFIED 12/16/2023
 
 #########################################
 #variable initialization
@@ -67,8 +74,8 @@ log_file_location="/volume1/web/logging/notifications"
 #########################################################
 #EMAIL SETTINGS USED IF CONFIGURATION FILE IS UNAVAILABLE
 #These variables will be overwritten with new corrected data if the configuration file loads properly. 
-email_address="admin@email.com"
-from_email_address="admin@email..com"
+email_address="email@email.com"
+from_email_address="admin@email.com"
 #########################################################
 
 #########################################################
@@ -97,96 +104,56 @@ function filter_data(){
 }
 
 #########################################################
-#this function is used to send notification if the SNMP data collection fails
+#this function is used to send notification if the sensors within the fortigate exceed the values configured in the web interface
 #########################################################
-function snmp_fail_fortigate_email(){
-	if check_internet; then
-		if [ $sendmail_installed -eq 1 ]; then
-			local current_time=$( date +%s )
-			if [ -r "$email_last_sent" ]; then #file is available and readable 
-				read message_tracker < $email_last_sent
-				local time_diff=$((( $current_time - $message_tracker ) / 60 ))
-			else
-				echo -n "$current_time" > $email_last_sent
-				local time_diff=$(( $email_interval + 1 ))
-			fi
-				
-			if [ $time_diff -ge $email_interval ]; then
-				local now=$(date +"%T")
-				echo "the email has not been sent in over $email_interval minutes, re-sending email"
-				local mailbody="$now - ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as it returned invalid data or was not reachable. Script \"${0##*/}\" failed"
-				echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-				echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-				echo "subject: Fortigate SNMP Data Collection failed" >> $log_file_location/fortigate_contents.txt
-				echo "" >> $log_file_location/fortigate_contents.txt
-				echo $mailbody >> $log_file_location/fortigate_contents.txt
-				local email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
-				if [[ "$email_response" == "" ]]; then
-					echo "" |& tee -a $log_file_location/fortigate_contents.txt
-					echo "Email Sent Successfully" |& tee -a $log_file_location/fortigate_contents.txt
-					message_tracker=$current_time
-					time_diff=0
-					echo -n "$message_tracker" > $email_last_sent
-				else
-					echo "Warning, an error occurred while sending the Fortigate SNMP Failure notification email. the error was: $email_response" |& tee -a $log_file_location/fortigate_contents.txt
-				fi
-			else
-				echo "Only $time_diff minuets have passed since the last notification, email will be sent every $email_interval minutes. $(( $email_interval - $time_diff )) Minutes Remaining Until Next Email"
-			fi
-		else
-			echo "Unable to send email, \"sendmail\" command is unavailable"
-		fi
-	else
-		echo "Internet is not available, skipping sending email"
-	fi
-	exit 1
-}
-
-#########################################################
-#this function is used to send notification if the SNMP data collection fails
-#########################################################
-function snmp_fail_fortAP_email(){
-#fortiap_device_serial=${1}
-#fail_text=${2}
+function send_email(){
+#email_last_sent_log_file=${1}			this file contains the UNIX time stamp of when the email is sent so we can track how long ago an email was last sent
+#message_text=${2}						this string of text contains the body of the email message
+#email_subject=${3}						this string of text contains the email subject line
+#email_contents_file=${4}				this file is where the contents of the email are saved prior to sending and it contains the log of the email transmission, either will indicated email sent successfully or will include the error details
+#error_message=${5}						this string of text is only displayed when the script is executed from the CLI, it will be part of the error message if the email is not sent correctly
+#email_interval=${6}					this numerical value will control how many minutes must pass before the next email is allowed to be sent
+	local message_tracker=""
+	local time_diff=0
 	echo "${2}"
 	echo ""
 	if check_internet; then
 		if [ $sendmail_installed -eq 1 ]; then
 			local current_time=$( date +%s )
-			if [ -r "$email_last_sent" ]; then #file is available and readable 
-				read message_tracker < $email_last_sent
-				local time_diff=$((( $current_time - $message_tracker ) / 60 ))
+			if [ -r "${1}" ]; then #file is available and readable 
+				read message_tracker < "${1}"
+				time_diff=$((( $current_time - $message_tracker ) / 60 ))
 			else
-				echo -n "$current_time" > $email_last_sent
-				local time_diff=$(( $email_interval + 1 ))
+				echo -n "$current_time" > "${1}"
+				time_diff=$(( ${6} + 1 ))
 			fi
 				
-			if [ $time_diff -ge $email_interval ]; then
+			if [ $time_diff -ge ${6} ]; then
 				local now=$(date +"%T")
-				echo "the email has not been sent in over $email_interval minutes, re-sending email"
-				echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-				echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-				echo "subject: FORTI-AP OFFLINE" >> $log_file_location/fortigate_contents.txt
-				echo "" >> $log_file_location/fortigate_contents.txt
-				echo "$now - ${2}" >> $log_file_location/fortigate_contents.txt #adding the mailbody text. 
-				local email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
+				echo "the email has not been sent in over ${6} minutes, re-sending email"
+				echo "from: $from_email_address " > "${4}"
+				echo "to: $email_address " >> "${4}"
+				echo "subject: ${3}" >> "${4}"
+				echo "" >> "${4}"
+				echo "$now - ${2}" >> "${4}" #adding the mailbody text. 
+				local email_response=$(sendmail -t < "${4}"  2>&1)
 				if [[ "$email_response" == "" ]]; then
-					echo "" |& tee -a $log_file_location/fortigate_contents.txt
-					echo "Email Sent Successfully" |& tee -a $log_file_location/fortigate_contents.txt
+					echo "" |& tee -a "${4}"
+					echo "Email Sent Successfully" |& tee -a "${4}"
 					message_tracker=$current_time
 					time_diff=0
-					echo -n "$message_tracker" > $email_last_sent
+					echo -n "$message_tracker" > "${1}"
 				else
-					echo "Warning, an error occurred while sending the FORTIAP SNMP Failure notification email. the error was: $email_response" |& tee -a $log_file_location/fortigate_contents.txt
+					echo "Warning, an error occurred while sending the ${5} notification email. the error was: $email_response" |& tee -a "${4}"
 				fi
 			else
-				echo "Only $time_diff minuets have passed since the last notification, email will be sent every $email_interval minutes. $(( $email_interval - $time_diff )) Minutes Remaining Until Next Email"
+				echo "Only $time_diff minuets have passed since the last notification, email will be sent every ${6} minutes. $(( ${6} - $time_diff )) Minutes Remaining Until Next Email"
 			fi
 		else
-			echo "Unable to send email, \"sendmail\" command is unavailable"
+			echo "Unable to send email, \"sendmail\" command is unavailable" |& tee -a "${4}"
 		fi
 	else
-		echo "Internet is not available, skipping sending email"
+		echo "Internet is not available, skipping sending email" |& tee -a "${4}"
 	fi
 }
 
@@ -195,7 +162,7 @@ function snmp_fail_fortAP_email(){
 #########################################################
 
 #create a lock file in the ramdisk directory to prevent more than one instance of this script from executing at once
-if ! mkdir $lock_file_location; then
+if ! mkdir "$lock_file_location"; then
 	echo "Failed to acquire lock.\n" >&2
 	exit 1
 fi
@@ -221,7 +188,7 @@ fi
 #reading in variables from configuration file
 if [ -r "$config_file_location" ]; then
 	#file is available and readable 
-	read input_read < $config_file_location
+	read input_read < "$config_file_location"
 	explode=(`echo $input_read | sed 's/,/\n/g'`)
 	
 	#verify the correct number of configuration parameters are in the configuration file
@@ -329,38 +296,35 @@ if [ -r "$config_file_location" ]; then
 				
 		#5
 			#we get nothing, the results are blank
-
-				
+		
 		if [[ "$serial_number" == "Error:"* ]]; then #will search for the first error type
-			echo "warning, the SNMP Auth password and or the Privacy password supplied is below the minimum 8 characters required. Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as the SNMP Auth password and or the Privacy password supplied is below the minimum 8 characters required. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 				
 		if [[ "$serial_number" == "Timeout:"* ]]; then #will search for the second error type
-			echo "The SNMP target did not respond. This could be the result of a bad SNMP privacy password, the wrong IP address, the wrong port, or SNMP services not being enabled on the target device"
-			echo "Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as The SNMP target did not respond. This could be the result of a bad SNMP privacy password, the wrong IP address, the wrong port, or SNMP services not being enabled on the target device. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 				
 		if [[ "$serial_number" == "snmpwalk: Unknown user name"* ]]; then #will search for the third error type
-			echo "warning, The supplied username is incorrect. Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as The supplied username is incorrect. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 				
 		if [[ "$serial_number" == "snmpwalk: Authentication failure (incorrect password, community or key)"* ]]; then #will search for the fourth error type
-			echo "The Authentication protocol or password is incorrect. Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as The Authentication protocol or password is incorrect. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 				
 		if [[ "$serial_number" == "" ]]; then #will search for the fifth error type
-			echo "Something is wrong with the SNMP settings, the results returned a blank/empty value. Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT Fortigate Unit at IP $snmp_device_url appears to have an issue with SNMP as something is wrong with the SNMP settings, the results returned a blank/empty value. Exiting Script. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 
 		if [[ "$serial_number" == "snmpwalk: Timeout" ]]; then #will search for the fifth error type
-			echo "The SNMP target did not respond. This could be the result of a bad SNMP privacy password, the wrong IP address, the wrong port, or SNMP services not being enabled on the target device"
-			echo "Exiting Script"
-			snmp_fail_fortigate_email
+			send_email "$email_last_sent" "ALERT The SNMP target $snmp_device_url did not respond. This could be the result of a bad SNMP privacy password, the wrong IP address, the wrong port, or SNMP services not being enabled on the target device. Script \"${0##*/}\" failed" "Fortigate SNMP Data Collection failed" "$log_file_location/fortigate_contents.txt" "Fortigate SNMP Failure" $email_interval
+			exit 1
 		fi
 
 		if [ ! $capture_interval -eq 10 ]; then
@@ -500,44 +464,7 @@ if [ -r "$config_file_location" ]; then
 				leave_proxy_conserve_mode=$(filter_data "Gauge32: " "$leave_proxy_conserve_mode")
 				
 				if [ $memory_usage -gt $memory_limit ]; then #the memory usage is getting too high
-					if [ $sendmail_installed -eq 1 ]; then
-						if check_internet; then
-							current_time=$( date +%s )
-							if [ -r "$email_last_sent" ]; then #file is available and readable 
-								read message_tracker < $email_last_sent
-								time_diff=$((( $current_time - $message_tracker ) / 60 ))
-							else
-								echo -n "$current_time" > $email_last_sent
-								time_diff=$(( $email_interval + 1 ))
-							fi
-
-							if [ $time_diff -ge $email_interval ]; then
-								now=$(date +"%T")
-								mailbody="$now - Warning Fortigate Memory Usage has exceeded $memory_limit%. Current Memory usage is $memory_usage"
-								echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-								echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-								echo "subject: Fortigate Memory Warning " >> $log_file_location/fortigate_contents.txt
-								echo "" >> $log_file_location/fortigate_contents.txt
-								echo $mailbody >> $log_file_location/fortigate_contents.txt
-								email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
-								if [[ "$email_response" == "" ]]; then
-									echo "" |& tee -a $log_file_location/fortigate_contents.txt
-									echo "Email Sent Successfully" |& tee -a $log_file_location/fortigate_contents.txt
-									message_tracker=$current_time
-									time_diff=0
-									echo -n "$message_tracker" > $email_last_sent
-								else
-									echo "Warning, an error occurred while sending the Fortigate Memory Usage notification email. the error was: $email_response" |& tee $log_file_location/fortigate_contents.txt
-								fi
-							else
-								echo "Only $time_diff minuets have passed since the last notification, email will be sent every $email_interval minutes. $(( $email_interval - $time_diff )) Minutes Remaining Until Next Email"
-							fi
-						else
-							echo "Internet is not available, skipping sending email"
-						fi
-					else
-						echo "Unable to send email, \"sendmail\" command is unavailable"
-					fi
+					send_email "$email_last_sent" "Warning Fortigate Memory Usage has exceeded $memory_limit%. Current Memory usage is $memory_usage%" "Fortigate Memory Warning" "$log_file_location/fortigate_contents.txt" "Fortigate Memory Usage" $email_interval
 				fi	
 			
 				post_url=$post_url"$measurement,snmp_device_name=$snmp_device_name memory_usage=$memory_usage,memory_capacity=$memory_capacity,enter_kernel_conserve_mode=$enter_kernel_conserve_mode,leave_kernel_conserve_mode=$leave_kernel_conserve_mode,enter_proxy_conserve_mode=$enter_proxy_conserve_mode,leave_proxy_conserve_mode=$leave_proxy_conserve_mode
@@ -570,49 +497,7 @@ if [ -r "$config_file_location" ]; then
 				
 				if [ $disk_used_percent -ge $disk_space_warning_threashold ]; then
 					if [ $enable_disk_space_warning_email -eq 1 ]; then
-						current_time=$( date +%s )
-						if [ -r "$email_last_sent" ]; then #file is available and readable
-							read message_tracker < $email_last_sent
-							email_time_diff=$((( $current_time - $message_tracker ) / 60 ))
-						else
-							email_time_diff=1441 #send an email daily (60 min per hour * 24 hours = 1440 min)
-							echo "$current_time" > $email_last_sent
-						fi
-								
-						now=$(date +"%T")
-						echo "Disk space usage on device IP $snmp_device_url is above $disk_space_warning_threashold percent. It is currently at $disk_used_percent percent."
-						if [ $email_time_diff -ge 1440 ]; then
-							if check_internet; then
-								#send an email indicating script config file is missing and script will not run
-								mailbody="$now - Disk space usage on device IP $snmp_device_url is above $disk_space_warning_threashold percent. It is currently at $disk_used_percent percent."
-								echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-								echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-								echo "subject: Fortigate Disk Usage Warning" >> $log_file_location/fortigate_contents.txt
-								echo "" >> $log_file_location/fortigate_contents.txt
-								echo $mailbody >> $log_file_location/fortigate_contents.txt
-								
-								if [[ "$email_address" == "" || "$from_email_address" == "" ]];then
-									echo -e "\n\nNo email address information is configured, Cannot send an email about disk space usage"
-								else
-									if [ $sendmail_installed -eq 1 ]; then
-										email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
-										if [[ "$email_response" == "" ]]; then
-											echo -e "\nEmail Sent Successfully" |& tee -a $log_file_location/fortigate_contents.txt
-											echo "$current_time" > $email_last_sent
-											email_time_diff=0
-										else
-											echo -e "\n\nWARNING -- An error occurred while sending email. The error was: $email_response\n\n" |& tee $log_file_location/fortigate_contents.txt
-										fi	
-									else
-										echo "Unable to send email, \"sendmail\" command is unavailable"
-									fi
-								fi
-							else
-								echo "Internet is not available, skipping sending email"
-							fi
-						else
-							echo -e "\n\nAnother email notification will be sent in $(( 1440 - $email_time_diff)) Minutes"
-						fi
+						send_email "$email_last_sent" "Disk space usage on device IP $snmp_device_url is above $disk_space_warning_threashold percent. It is currently at $disk_used_percent percent." "Fortigate Disk Usage Warning" "$log_file_location/fortigate_contents.txt" "Disk Space Usage Warning" 1440
 					fi
 				fi
 				post_url=$post_url"$measurement,snmp_device_name=$snmp_device_name disk_usage=$disk_usage,disk_size=$disk_size,disk_used_percent=$disk_used_percent
@@ -663,14 +548,7 @@ if [ -r "$config_file_location" ]; then
 					
 					if [[ ${usb_status_array[$xx]} == 1 ]]; then
 						if [ $enable_USB_port_state_change_email -eq 1 ]; then
-							current_time=$( date +%s )
-							if [ -r "$email_last_sent" ]; then #file is available and readable
-								read message_tracker < $email_last_sent
-								email_time_diff=$((( $current_time - $message_tracker ) / 60 ))
-							else
-								email_time_diff=61 
-								echo "$current_time" > $email_last_sent
-							fi
+							device_type=""
 							
 							if [ ${usb_device_array[$xx]} -eq 0 ]; then
 								device_type="IFC"
@@ -701,41 +579,8 @@ if [ -r "$config_file_location" ]; then
 							elif [ ${usb_device_array[$xx]} -eq 255 ]; then
 								device_type="vendorSpec"
 							fi
-									
-							now=$(date +"%T")
-							echo "USB Device detected on device IP $snmp_device_url. Device type is \"$device_type\""
-							if [ $email_time_diff -ge 60 ]; then
-								if check_internet; then
-									#send an email indicating script config file is missing and script will not run
-									mailbody="$now - USB Device detected on device IP $snmp_device_url. Device type is \"$device_type\""
-									echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-									echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-									echo "subject: Fortigate USB Port Active Alert" >> $log_file_location/fortigate_contents.txt
-									echo "" >> $log_file_location/fortigate_contents.txt
-									echo $mailbody >> $log_file_location/fortigate_contents.txt
-									
-									if [[ "$email_address" == "" || "$from_email_address" == "" ]];then
-										echo -e "\n\nNo email address information is configured, Cannot send an email about USB port"
-									else
-										if [ $sendmail_installed -eq 1 ]; then
-											email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
-											if [[ "$email_response" == "" ]]; then
-												echo -e "\nEmail Sent Successfully" |& tee -a $log_file_location/fortigate_contents.txt
-												echo "$current_time" > $email_last_sent
-												email_time_diff=0
-											else
-												echo -e "\n\nWARNING -- An error occurred while sending email. The error was: $email_response\n\n" |& tee $log_file_location/fortigate_contents.txt
-											fi	
-										else
-											echo "Unable to send email, \"sendmail\" command is unavailable"
-										fi
-									fi
-								else
-									echo "Internet is not available, skipping sending email"
-								fi
-							else
-								echo -e "\n\nAnother email notification will be sent in $(( 60 - $email_time_diff)) Minutes"
-							fi
+							
+							send_email "$email_last_sent" "USB Device detected on device IP $snmp_device_url. Device type is \"$device_type\"" "Fortigate USB Port Active Alert" "$log_file_location/fortigate_contents.txt" "USB Device Detail" $email_interval
 						fi
 					fi
 				done
@@ -1104,18 +949,18 @@ if [ -r "$config_file_location" ]; then
 					fap_state=$(snmpwalk -v3 -l authPriv -u $snmp_user -a $snmp_auth_protocol -A $AuthPass1 -x $snmp_privacy_protocol -X $PrivPass2 $snmp_device_url:161 1.3.6.1.4.1.12356.101.14.4.4.1.7.1.16$WTPID -Ovt 2>&1)
 					fap_state=$(filter_data "INTEGER: " "$fap_state")
 					if [[ "$fap_state" == *"OID"* ]]; then 
-						snmp_fail_fortAP_email ${explode[$xx]} "The FAP did not return valid data"
+						send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} did not return valid data" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
 					elif [[ "$fap_state" != 2 ]]; then 
-						if [[ "$fap_state" != 0 ]]; then
-							snmp_fail_fortAP_email ${explode[$xx]} "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"OTHER\""
-						elif [[ "$fap_state" != 1 ]]; then
-							snmp_fail_fortAP_email ${explode[$xx]} "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"OFFLINE\""
-						elif [[ "$fap_state" != 3 ]]; then
-							snmp_fail_fortAP_email ${explode[$xx]} "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"Downloading Image\""
-						elif [[ "$fap_state" != 4 ]]; then
-							snmp_fail_fortAP_email ${explode[$xx]} "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"Connected Image\""
-						elif [[ "$fap_state" != 5 ]]; then
-							snmp_fail_fortAP_email ${explode[$xx]} "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"STANBY\""
+						if [[ "$fap_state" == 0 ]]; then
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"OTHER\"" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
+						elif [[ "$fap_state" == 1 ]]; then
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"OFFLINE\"" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
+						elif [[ "$fap_state" == 3 ]]; then
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"Downloading Image\"" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
+						elif [[ "$fap_state" == 4 ]]; then
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"Connected Image\"" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
+						elif [[ "$fap_state" == 5 ]]; then
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FortiAP ${explode[$xx]} is not ONLINE, its state is \"STANDBY\"" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
 						fi
 					else
 						#since the status is "2" the FortiAP is online, let's get its details
@@ -1195,7 +1040,7 @@ if [ -r "$config_file_location" ]; then
 
 "
 						else
-							snmp_fail_fortAP_email ${explode[$xx]} "FORTI-AP ${explode[$xx]} returned one or more \"IOD is not available\" errors so data is being skipped"
+							send_email "$log_file_location/${explode[$xx]}_email_last_sent.txt" "Warning FORTI-AP ${explode[$xx]} returned one or more \"IOD is not available\" errors so data is being skipped" "FORTI-AP OFFLINE" "$log_file_location/fortigate_contents.txt" "FORTIAP SNMP Failure" $email_interval
 						fi
 					fi	
 				done
@@ -1254,18 +1099,15 @@ if [ -r "$config_file_location" ]; then
 							if [[ ${sensor_names_array[$xx]} == ${sensor_paramter_name[$attribute_counter]} ]]; then
 								if [[ ${sensor_paramter_type[$attribute_counter]} == ">" ]]; then
 									if [[ $sensor_value > ${sensor_paramter_notification_threshold[$attribute_counter]} ]]; then
-										#send_mail ${sensor_names_array[$xx]} ${sensor_paramter_notification_threshold[$attribute_counter]} $disk_path $nas_name $attribute_raw $email_contents $from_email_address $email_address "has exceeded"
-										echo -e "\n\n${sensor_names_array[$xx]} has exceeded ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value\n\n"
+										send_email "$log_file_location/${sensor_names_array[$xx]}_email_last_sent.txt" "$Alert! {sensor_names_array[$xx]} has exceeded ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value" "Fortigate Sensor Alert" "$log_file_location/fortigate_contents.txt" "Fortigate Sensor Failure" $email_interval
 									fi
 								elif [[ ${sensor_paramter_type[$attribute_counter]} == "=" ]]; then
 									if [[ $sensor_value == ${sensor_paramter_notification_threshold[$attribute_counter]} ]]; then
-										#send_mail ${sensor_names_array[$xx]} ${sensor_paramter_notification_threshold[$attribute_counter]} $disk_path $nas_name $attribute_raw $email_contents $from_email_address $email_address "is equal to"
-										echo -e "\n\n${sensor_names_array[$xx]} is equal to ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value\n\n"
+										send_email "$log_file_location/${sensor_names_array[$xx]}_email_last_sent.txt" "$Alert! {sensor_names_array[$xx]} is equal to ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value" "Fortigate Sensor Alert" "$log_file_location/fortigate_contents.txt" "Fortigate Sensor Failure" $email_interval
 									fi
 								elif [[ ${sensor_paramter_type[$attribute_counter]} == "<" ]]; then
 									if [[ $sensor_value < ${sensor_paramter_notification_threshold[$attribute_counter]} ]]; then
-										#send_mail ${sensor_names_array[$xx]} ${sensor_paramter_notification_threshold[$attribute_counter]} $disk_path $nas_name $attribute_raw $email_contents $from_email_address $email_address "is less than"
-										echo -e "\n\n${sensor_names_array[$xx]} is less than ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value\n\n"
+										send_email "$log_file_location/${sensor_names_array[$xx]}_email_last_sent.txt" "$Alert! {sensor_names_array[$xx]} is less ${sensor_paramter_notification_threshold[$attribute_counter]}, current value = $sensor_value" "Fortigate Sensor Alert" "$log_file_location/fortigate_contents.txt" "Fortigate Sensor Failure" $email_interval
 									fi
 								fi
 							fi
@@ -1302,49 +1144,6 @@ if [ -r "$config_file_location" ]; then
 		echo "script is disabled"
 	fi
 else
-	#determine when the last time a general notification email was sent out. this will make sure we send an email only every x minutes
-	current_time=$( date +%s )
-	if [ -r "$email_last_sent" ]; then #file is available and readable
-		read message_tracker < $email_last_sent
-		email_time_diff=$((( $current_time - $message_tracker ) / 60 ))
-	else
-		email_time_diff=61
-		echo "$current_time" > $email_last_sent
-	fi
-			
-	now=$(date +"%T")
-	echo "Configuration file for script \"${0##*/}\" is missing, skipping script and will send alert email every 60 minuets"
-	if [ $email_time_diff -ge 60 ]; then
-		if check_internet; then
-			#send an email indicating script config file is missing and script will not run
-			mailbody="$now - Warning SNMP Monitoring Failed for script \"${0##*/}\" - Configuration file is missing "
-			echo "from: $from_email_address " > $log_file_location/fortigate_contents.txt
-			echo "to: $email_address " >> $log_file_location/fortigate_contents.txt
-			echo "subject: Warning SNMP Monitoring Failed for script \"${0##*/}\" - Configuration file is missing " >> $log_file_location/fortigate_contents.txt
-			echo "" >> $log_file_location/fortigate_contents.txt
-			echo $mailbody >> $log_file_location/fortigate_contents.txt
-			
-			if [[ "$email_address" == "" || "$from_email_address" == "" ]];then
-				echo -e "\n\nNo email address information is configured, Cannot send an email indicating script \"${0##*/}\" config file is missing and script will not run"
-			else
-				if [ $sendmail_installed -eq 1 ]; then
-					email_response=$(sendmail -t < $log_file_location/fortigate_contents.txt  2>&1)
-					if [[ "$email_response" == "" ]]; then
-						echo -e "\nEmail Sent Successfully indicating script \"${0##*/}\" config file is missing and script will not run" |& tee -a $log_file_location/fortigate_contents.txt
-						echo "$current_time" > $email_last_sent
-						email_time_diff=0
-					else
-						echo -e "\n\nWARNING -- An error occurred while sending email. The error was: $email_response\n\n" |& tee $log_file_location/fortigate_contents.txt
-					fi	
-				else
-					echo "Unable to send email, \"sendmail\" command is unavailable"
-				fi
-			fi
-		else
-			echo "Internet is not available, skipping sending email"
-		fi
-	else
-		echo -e "\n\nAnother email notification will be sent in $(( 60 - $email_time_diff)) Minutes"
-	fi
+	send_email "$email_last_sent" "Warning SNMP Monitoring Failed for script \"${0##*/}\" - Configuration file is missing " "Warning SNMP Monitoring Failed for script \"${0##*/}\" - Configuration file is missing " "$log_file_location/fortigate_contents.txt" "Missing Config File" 60
 	exit 1
 fi
